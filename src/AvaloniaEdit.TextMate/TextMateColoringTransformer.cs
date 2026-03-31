@@ -77,22 +77,22 @@ namespace AvaloniaEdit.TextMate
         {
             ThrowIfDisposed();
 
+            IGrammar grammar;
             lock (_lock)
             {
                 ThrowIfDisposed();
 
                 _areVisualLinesValid = false;
+                _firstVisibleLineIndex = 0;
+                _lastVisibleLineIndex = int.MaxValue;
                 _document = document;
                 _model = model;
-
-                // Null guard: prevents NRE when model is null (e.g., during
-                // Installation.Dispose teardown). This also enables Installation
-                // to safely call SetModel(null, null) to sever stale references.
-                if (_grammar != null && _model != null)
-                {
-                    _model.SetGrammar(_grammar);
-                }
+                grammar = _grammar;
             }
+
+            // Called outside _lock: same lock-inversion risk as SetGrammar.
+            if (grammar != null && model != null)
+                model.SetGrammar(grammar);
         }
 
         /// <summary>
@@ -231,17 +231,20 @@ namespace AvaloniaEdit.TextMate
         {
             ThrowIfDisposed();
 
+            TMModel model;
             lock (_lock)
             {
                 ThrowIfDisposed();
 
                 _grammar = grammar;
-
-                if (_model != null)
-                {
-                    _model.SetGrammar(grammar);
-                }
+                model = _model;
             }
+
+            // Called outside _lock to prevent lock-inversion deadlock: TMModel's
+            // background tokenizer calls ModelTokensChanged (which acquires _lock)
+            // while holding TMModel's internal lock, so we must not hold _lock when
+            // calling into TMModel.
+            model?.SetGrammar(grammar);
         }
 
         /// <summary>
