@@ -1578,6 +1578,16 @@ namespace AvaloniaEdit.Rendering
             }
             newScrollOffsetX = ValidateVisualOffset(newScrollOffsetX);
             newScrollOffsetY = ValidateVisualOffset(newScrollOffsetY);
+
+            // Clamp to scroll extent so ArrangeOverride won't re-clamp and
+            // trigger InvalidateMeasure, which would cause a layout cycle when
+            // BringCaretToView requests an offset beyond the extent (e.g. the
+            // caret border extends past the last character on the longest line).
+            if (_scrollViewport.Width > 0)
+                newScrollOffsetX = Math.Min(newScrollOffsetX, Math.Max(0, _scrollExtent.Width - _scrollViewport.Width));
+            if (_scrollViewport.Height > 0)
+                newScrollOffsetY = Math.Min(newScrollOffsetY, Math.Max(0, _scrollExtent.Height - _scrollViewport.Height));
+
             var newScrollOffset = new Vector(newScrollOffsetX, newScrollOffsetY);
             if (!_scrollOffset.IsClose(newScrollOffset))
             {
