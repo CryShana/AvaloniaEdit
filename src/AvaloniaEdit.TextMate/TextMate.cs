@@ -315,7 +315,10 @@ namespace AvaloniaEdit.TextMate
 
                         _editorModel = new TextEditorModel(_editor.TextArea.TextView, _editor.Document, _exceptionHandler);
                         _tmModel = new TMModel(_editorModel);
-                        _tmModel.SetGrammar(_grammar);
+
+                        // Grammar is not set here - it will be set by the caller
+                        // via SetGrammar(). Setting a stale grammar on a fresh model
+                        // can deadlock the tokenizer thread in TMModel.
 
                         _transformer.SetModel(_editor.Document, _tmModel);
                         _tmModel.AddModelTokensChangedListener(_transformer);

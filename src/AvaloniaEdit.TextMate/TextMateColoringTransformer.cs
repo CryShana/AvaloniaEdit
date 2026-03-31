@@ -77,7 +77,6 @@ namespace AvaloniaEdit.TextMate
         {
             ThrowIfDisposed();
 
-            IGrammar grammar;
             lock (_lock)
             {
                 ThrowIfDisposed();
@@ -87,12 +86,10 @@ namespace AvaloniaEdit.TextMate
                 _lastVisibleLineIndex = int.MaxValue;
                 _document = document;
                 _model = model;
-                grammar = _grammar;
             }
 
-            // Called outside _lock: same lock-inversion risk as SetGrammar.
-            if (grammar != null && model != null)
-                model.SetGrammar(grammar);
+            // Grammar is not pushed to the model here - the caller sets it
+            // via SetGrammar() to avoid a tokenizer deadlock in TMModel.
         }
 
         /// <summary>
