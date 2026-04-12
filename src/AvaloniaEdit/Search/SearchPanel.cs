@@ -19,6 +19,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -146,6 +148,11 @@ namespace AvaloniaEdit.Search
         // Large read-only docs freeze the UI otherwise.
         private static readonly TimeSpan SearchDebounceDelay = TimeSpan.FromMilliseconds(150);
         private DispatcherTimer _debounceTimer;
+
+        // Background search: the regex scan runs on a worker thread so the UI
+        // stays responsive on large documents. Stale searches are cancelled
+        // via the CTS when a newer query supersedes them.
+        private CancellationTokenSource _searchCts;
 
         private static void SearchPatternChangedCallback(AvaloniaPropertyChangedEventArgs e)
         {
@@ -486,6 +493,12 @@ namespace AvaloniaEdit.Search
             if (IsClosed)
                 return;
 
+            // Cancel any in-flight background search. Its posted UI callback
+            // will see the cancelled token and bail out before mutating state.
+            _searchCts?.Cancel();
+            _searchCts?.Dispose();
+            _searchCts = null;
+
             CleanSearchResults();
 
             var offset = Math.Max(_textArea.Caret.Offset - _textArea.Selection.Length, 0);
@@ -494,29 +507,86 @@ namespace AvaloniaEdit.Search
             {
                 _textArea.ClearSelection();
             }
-            
-            if (!string.IsNullOrEmpty(SearchPattern))
+
+            var pattern = SearchPattern;
+            var strategy = _strategy;
+            var document = _textArea.Document;
+
+            if (string.IsNullOrEmpty(pattern) || strategy == null || document == null)
             {
-                // We cast from ISearchResult to SearchResult; this is safe because we always use the built-in strategy
-                foreach (var result in _strategy.FindAll(_textArea.Document, 0, _textArea.Document.TextLength).Cast<SearchResult>())
-                {
-                    _renderer.CurrentResults.Add(result);
-                }
-
-                if (changeSelection)
-                {
-                    // select the first result after the caret position
-                    // or the first result in document order if there is no result after the caret
-                    var result = _renderer.CurrentResults.FindFirstSegmentWithStartAfter(offset) ??
-                                 _renderer.CurrentResults.FirstSegment;
-
-                    if (result != null)
-                        SelectResult(result);
-
-                    _currentSearchResultIndex = _renderer.CurrentResults.Count - 1;
-                }
+                UpdateSearchLabel();
+                _textArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                return;
             }
 
+            // Snapshot the document text on the UI thread - TextDocument is not
+            // thread-safe, but .Text returns an immutable string we can hand off.
+            var docText = document.Text;
+            var docLength = document.TextLength;
+
+            var cts = new CancellationTokenSource();
+            _searchCts = cts;
+            var token = cts.Token;
+
+            _ = Task.Run(() =>
+            {
+                List<SearchResult> results;
+                try
+                {
+                    var source = new StringTextSource(docText);
+                    results = new List<SearchResult>();
+                    int count = 0;
+                    foreach (var r in strategy.FindAll(source, 0, docLength).Cast<SearchResult>())
+                    {
+                        // Check cancellation every 1024 matches to keep overhead low.
+                        if ((++count & 0x3FF) == 0 && token.IsCancellationRequested)
+                            return;
+                        results.Add(r);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    // Regex timeout or similar - drop silently; the UI already shows "no matches".
+                    return;
+                }
+
+                if (token.IsCancellationRequested)
+                    return;
+
+                Dispatcher.UIThread.Post(() =>
+                {
+                    // Stale result (newer search started or panel closed)?
+                    if (token.IsCancellationRequested || IsClosed)
+                        return;
+                    if (!ReferenceEquals(_searchCts, cts))
+                        return;
+
+                    foreach (var r in results)
+                        _renderer.CurrentResults.Add(r);
+
+                    if (changeSelection)
+                    {
+                        // select the first result after the caret position
+                        // or the first result in document order if there is no result after the caret
+                        var first = _renderer.CurrentResults.FindFirstSegmentWithStartAfter(offset) ??
+                                    _renderer.CurrentResults.FirstSegment;
+
+                        if (first != null)
+                            SelectResult(first);
+
+                        _currentSearchResultIndex = _renderer.CurrentResults.Count - 1;
+                    }
+
+                    UpdateSearchLabel();
+                    _textArea.TextView.InvalidateLayer(KnownLayer.Selection);
+                });
+            }, token);
+
+            // Also update the label immediately so stale "N matches" text clears.
             UpdateSearchLabel();
             _textArea.TextView.InvalidateLayer(KnownLayer.Selection);
         }
@@ -613,6 +683,9 @@ namespace AvaloniaEdit.Search
         public void Close()
         {
             _debounceTimer?.Stop();
+            _searchCts?.Cancel();
+            _searchCts?.Dispose();
+            _searchCts = null;
 
             _textArea.RemoveChild(this);
 
