@@ -24,6 +24,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Threading;
 
 using AvaloniaEdit.Document;
 using AvaloniaEdit.Editing;
@@ -141,11 +142,44 @@ namespace AvaloniaEdit.Search
 
         private ISearchStrategy _strategy;
 
+        // Debounce: avoid running a full-document regex scan on every keystroke.
+        // Large read-only docs freeze the UI otherwise.
+        private static readonly TimeSpan SearchDebounceDelay = TimeSpan.FromMilliseconds(150);
+        private DispatcherTimer _debounceTimer;
+
         private static void SearchPatternChangedCallback(AvaloniaPropertyChangedEventArgs e)
         {
             if (e.Sender is SearchPanel panel)
             {
-                panel.UpdateSearch();
+                panel.ScheduleUpdateSearch();
+            }
+        }
+
+        private void ScheduleUpdateSearch()
+        {
+            if (_debounceTimer == null)
+            {
+                _debounceTimer = new DispatcherTimer { Interval = SearchDebounceDelay };
+                _debounceTimer.Tick += DebounceTimerTick;
+            }
+            _debounceTimer.Stop();
+            _debounceTimer.Start();
+        }
+
+        private void DebounceTimerTick(object sender, EventArgs e)
+        {
+            _debounceTimer.Stop();
+            UpdateSearch();
+        }
+
+        // Called before actions that read _renderer.CurrentResults (FindNext, Replace, etc.)
+        // so a pending debounced search is applied immediately.
+        private void FlushPendingSearch()
+        {
+            if (_debounceTimer != null && _debounceTimer.IsEnabled)
+            {
+                _debounceTimer.Stop();
+                UpdateSearch();
             }
         }
 
@@ -211,6 +245,12 @@ namespace AvaloniaEdit.Search
         public void Uninstall()
         {
             Close();
+            if (_debounceTimer != null)
+            {
+                _debounceTimer.Stop();
+                _debounceTimer.Tick -= DebounceTimerTick;
+                _debounceTimer = null;
+            }
             _textArea.DocumentChanged -= TextArea_DocumentChanged;
             if (_currentDocument != null)
                 _currentDocument.TextChanged -= TextArea_Document_TextChanged;
@@ -373,6 +413,7 @@ namespace AvaloniaEdit.Search
         /// </summary>
         public void FindNext(int startOffset = -1)
         {
+            FlushPendingSearch();
             var result = _renderer.CurrentResults.FindFirstSegmentWithStartAfter(startOffset == -1 ? _textArea.Caret.Offset : startOffset) ??
                          _renderer.CurrentResults.FirstSegment;
             if (result != null)
@@ -386,6 +427,7 @@ namespace AvaloniaEdit.Search
         /// </summary>
         public void FindPrevious()
         {
+            FlushPendingSearch();
             var result = _renderer.CurrentResults.FindFirstSegmentWithStartAfter(
                 Math.Max(_textArea.Caret.Offset - _textArea.Selection.Length, 0));
             if (result != null)
@@ -415,6 +457,7 @@ namespace AvaloniaEdit.Search
         {
             if (!IsReplaceMode) return;
 
+            FlushPendingSearch();
             var replacement = ReplacePattern ?? string.Empty;
             var document = _textArea.Document;
             using (document.RunUpdate())
@@ -569,13 +612,15 @@ namespace AvaloniaEdit.Search
         /// </summary>
         public void Close()
         {
+            _debounceTimer?.Stop();
+
             _textArea.RemoveChild(this);
 
             if (_messageView != null)
                 _messageView.IsVisible = false;
 
             _textArea.TextView.BackgroundRenderers.Remove(_renderer);
-            
+
             IsClosed = true;
 
             // Clear existing search results so that the segments don't have to be maintained
